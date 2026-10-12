@@ -1,8 +1,22 @@
-# Локальные файлы окружения: создаются tripgoctl, у каждого свои
+# Build output
+/bin/
+/trip-service
+/trip-service.exe
+
+# Local environment
 .env
 .tripgo/
 
-# Сборка
-bin/
+# Personal documentation
+/local-notes/
+/course-materials/
+/readme2.md
 
+# IDE and OS
+.idea/
+.vscode/
 .DS_Store
+Thumbs.db
+
+# Test artifacts
+coverage.out
