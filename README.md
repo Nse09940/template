@@ -26,7 +26,9 @@ make run
 `tripgoctl environment start` читает корневой
 [`environment.toml`](environment.toml) и создаёт локальный `.env`. Makefile
 сначала загружает безопасные значения из `.env.example`, затем адреса окружения
-из `.env`. Сервис по умолчанию доступен на `http://localhost:8080`.
+из `.env`. Значения из окружения shell имеют приоритет над обоими файлами, а
+аргументы вида `make run SHUTDOWN_TIMEOUT=2s` — над всеми источниками. Сервис по
+умолчанию доступен на `http://localhost:8080`.
 
 Проверка:
 
@@ -126,7 +128,8 @@ CREATE UNIQUE INDEX trips_one_active_per_driver_idx
 сгенерированный `trip_id` объявлен `DEFERRABLE INITIALLY DEFERRED`, поэтому он
 проверяется при commit. Параллельные запросы с одним ключом блокируются на его
 уникальном индексе: один создаёт поездку, остальные после commit читают её и не
-создают дубликаты. Истёкшая запись удаляется при следующем использовании ключа.
+создают дубликаты. Перед резервированием нового ключа сервис удаляет все истёкшие
+записи по индексу `expires_at`.
 
 ### Менеджер транзакций
 
@@ -182,8 +185,8 @@ tripgoctl environment start
 make migrate
 ```
 
-При запуске контейнера адрес `localhost` из `.env` заменяется на специальное имя
-хоста Docker Desktop:
+В Docker Desktop для macOS и Windows адрес `localhost` из `.env` заменяется на
+специальное имя хоста `host.docker.internal`:
 
 ```bash
 DATABASE_URL="$(sed -n 's/^DATABASE_URL=//p' .env)"
@@ -194,6 +197,20 @@ docker run --rm -p 8080:8080 \
   --env "DATABASE_URL=${DATABASE_URL/localhost/host.docker.internal}" \
   trip-service:lab1
 ```
+
+В Linux с обычным Docker Engine имя `host.docker.internal` по умолчанию не
+резолвится. Контейнер можно запустить в сети хоста: тогда PostgreSQL окружения
+доступен по исходному адресу `localhost`, а подменять `DATABASE_URL` не нужно:
+
+```bash
+docker run --rm --network host \
+  --env-file .env.example \
+  --env-file .env \
+  trip-service:lab1
+```
+
+С `--network host` публиковать порт через `-p` не требуется: сервис слушает
+порт `8080` непосредственно на хосте.
 
 Проверка контейнера:
 

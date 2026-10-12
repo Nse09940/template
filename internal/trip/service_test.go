@@ -24,7 +24,7 @@ func (m *fakeTxManager) Do(ctx context.Context, fn func(context.Context) error) 
 type fakeRepository struct {
 	insert                         func(context.Context, Trip) error
 	insertStatusHistory            func(context.Context, uuid.UUID, *Status, Status, string, time.Time) error
-	deleteExpiredCreateIdempotency func(context.Context, uuid.UUID, time.Time) error
+	deleteExpiredCreateIdempotency func(context.Context, time.Time) error
 	tryReserveCreateIdempotency    func(
 		context.Context,
 		uuid.UUID,
@@ -40,10 +40,9 @@ type fakeRepository struct {
 
 func (r fakeRepository) DeleteExpiredCreateIdempotency(
 	ctx context.Context,
-	key uuid.UUID,
 	now time.Time,
 ) error {
-	return r.deleteExpiredCreateIdempotency(ctx, key, now)
+	return r.deleteExpiredCreateIdempotency(ctx, now)
 }
 
 func (r fakeRepository) TryReserveCreateIdempotency(
@@ -101,6 +100,9 @@ func (r fakeRepository) FinishActive(
 func TestCreateWritesTripAndHistoryInOneTransaction(t *testing.T) {
 	t.Parallel()
 
+	moscow := time.FixedZone("Europe/Moscow", 3*60*60)
+	now := time.Date(2026, 8, 24, 17, 18, 27, 905923546, moscow)
+	wantStartedAt := now.UTC().Truncate(time.Microsecond)
 	txManager := &fakeTxManager{}
 	var inserted Trip
 	repository := fakeRepository{
@@ -129,6 +131,7 @@ func TestCreateWritesTripAndHistoryInOneTransaction(t *testing.T) {
 		},
 	}
 	service := NewService(repository, txManager)
+	service.now = func() time.Time { return now }
 
 	result, err := service.Create(context.Background(), CreateInput{
 		UserID:   uuid.New(),
@@ -152,6 +155,9 @@ func TestCreateWritesTripAndHistoryInOneTransaction(t *testing.T) {
 	if result.Trip.ID == uuid.Nil || result.Trip.Status != StatusActive || result.Trip.FinishedAt != nil {
 		t.Fatalf("unexpected created trip: %+v", result.Trip)
 	}
+	if result.Trip.StartedAt != wantStartedAt {
+		t.Fatalf("StartedAt = %s, want %s", result.Trip.StartedAt, wantStartedAt)
+	}
 }
 
 func TestCreateReservesIdempotencyKeyForOneDay(t *testing.T) {
@@ -161,10 +167,10 @@ func TestCreateReservesIdempotencyKeyForOneDay(t *testing.T) {
 	deleted := false
 	reserved := false
 	repository := fakeRepository{
-		deleteExpiredCreateIdempotency: func(_ context.Context, gotKey uuid.UUID, _ time.Time) error {
+		deleteExpiredCreateIdempotency: func(_ context.Context, now time.Time) error {
 			deleted = true
-			if gotKey != key {
-				t.Fatalf("delete key = %s, want %s", gotKey, key)
+			if now.IsZero() {
+				t.Fatal("cleanup cutoff is zero")
 			}
 			return nil
 		},
@@ -222,7 +228,7 @@ func TestCreateReplaysSameIdempotencyRequest(t *testing.T) {
 	existing := Trip{ID: uuid.New(), Status: StatusActive}
 	var requestHash []byte
 	repository := fakeRepository{
-		deleteExpiredCreateIdempotency: func(context.Context, uuid.UUID, time.Time) error {
+		deleteExpiredCreateIdempotency: func(context.Context, time.Time) error {
 			return nil
 		},
 		tryReserveCreateIdempotency: func(
@@ -269,7 +275,7 @@ func TestCreateRejectsReusedIdempotencyKeyWithDifferentRequest(t *testing.T) {
 
 	key := uuid.New()
 	repository := fakeRepository{
-		deleteExpiredCreateIdempotency: func(context.Context, uuid.UUID, time.Time) error {
+		deleteExpiredCreateIdempotency: func(context.Context, time.Time) error {
 			return nil
 		},
 		tryReserveCreateIdempotency: func(

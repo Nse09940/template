@@ -75,7 +75,7 @@ type Repository interface {
 		reason string,
 		changedAt time.Time,
 	) error
-	DeleteExpiredCreateIdempotency(ctx context.Context, key uuid.UUID, now time.Time) error
+	DeleteExpiredCreateIdempotency(ctx context.Context, now time.Time) error
 	TryReserveCreateIdempotency(
 		ctx context.Context,
 		key uuid.UUID,
@@ -108,7 +108,7 @@ func NewService(repository Repository, txManager TxManager) *Service {
 }
 
 func (s *Service) Create(ctx context.Context, input CreateInput) (CreateResult, error) {
-	now := s.now().UTC()
+	now := s.now().UTC().Truncate(time.Microsecond)
 	created := Trip{
 		ID:         uuid.New(),
 		UserID:     input.UserID,
@@ -147,10 +147,9 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (CreateResult, 
 		if input.IdempotencyKey != nil {
 			if err := s.repository.DeleteExpiredCreateIdempotency(
 				txCtx,
-				*input.IdempotencyKey,
 				now,
 			); err != nil {
-				return fmt.Errorf("delete expired create idempotency key: %w", err)
+				return fmt.Errorf("delete expired create idempotency keys: %w", err)
 			}
 
 			reserved, err := s.repository.TryReserveCreateIdempotency(
@@ -215,7 +214,7 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Trip, error) {
 }
 
 func (s *Service) Finish(ctx context.Context, id uuid.UUID) (Trip, error) {
-	finishedAt := s.now().UTC()
+	finishedAt := s.now().UTC().Truncate(time.Microsecond)
 	var finished Trip
 
 	err := s.txManager.Do(ctx, func(txCtx context.Context) error {

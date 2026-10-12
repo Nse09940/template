@@ -281,10 +281,12 @@ components:
             type: string
             format: date-time
             nullable: true
+            x-omitempty: false
           last_position_at:
             type: string
             format: date-time
             nullable: true
+            x-omitempty: false
     PositionData:
       type: object
       additionalProperties: false

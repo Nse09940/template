@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,9 +20,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const serviceName = "trip-service"
+
 func main() {
+	slog.SetDefault(newJSONLogger(os.Stdout, slog.LevelInfo))
 	if err := run(); err != nil {
-		slog.Error("trip service stopped", "error", err)
+		slog.Error("trip service exited", "error", err)
 		os.Exit(1)
 	}
 }
@@ -139,10 +143,6 @@ func run() error {
 }
 
 func closeWithinDeadline(ctx context.Context, closeFn func()) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
 	done := make(chan struct{})
 	go func() {
 		closeFn()
@@ -163,7 +163,11 @@ func newLogger(levelText string) (*slog.Logger, error) {
 		return nil, fmt.Errorf("LOG_LEVEL: %w", err)
 	}
 
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	return newJSONLogger(os.Stdout, level), nil
+}
+
+func newJSONLogger(output io.Writer, level slog.Leveler) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{
 		Level: level,
-	})), nil
+	})).With("service", serviceName)
 }

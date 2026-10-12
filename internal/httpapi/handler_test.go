@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,30 +73,57 @@ func TestCreateTripRejectsInvalidBodies(t *testing.T) {
 		"end_point":{"latitude":59.8,"longitude":30.4},
 		"price":1450`
 
-	tests := map[string]string{
-		"missing required field": `{"user_id":"5cb72c04-7650-45c9-a79b-bcdba0631e0c",
+	tests := map[string]struct {
+		body       string
+		wantDetail string
+	}{
+		"missing required field": {
+			body: `{"user_id":"5cb72c04-7650-45c9-a79b-bcdba0631e0c",
 			"driver_id":"8860b315-ec86-42eb-a17c-7c163d721ff5",
 			"start_point":{"latitude":59.9,"longitude":30.3},
 			"price":1450}`,
-		"missing nested field": `{"user_id":"5cb72c04-7650-45c9-a79b-bcdba0631e0c",
+			wantDetail: `required field "end_point" is missing`,
+		},
+		"missing nested field": {
+			body: `{"user_id":"5cb72c04-7650-45c9-a79b-bcdba0631e0c",
 			"driver_id":"8860b315-ec86-42eb-a17c-7c163d721ff5",
 			"start_point":{"latitude":59.9},
 			"end_point":{"latitude":59.8,"longitude":30.4},
 			"price":1450}`,
-		"unknown field":         "{" + valid + `,"unexpected":true}`,
-		"out of range latitude": "{" + strings.Replace(valid, `"latitude":59.9`, `"latitude":91`, 1) + "}",
-		"null price":            "{" + strings.Replace(valid, `"price":1450`, `"price":null`, 1) + "}",
-		"null latitude":         "{" + strings.Replace(valid, `"latitude":59.9`, `"latitude":null`, 1) + "}",
-		"null longitude":        "{" + strings.Replace(valid, `"longitude":30.3`, `"longitude":null`, 1) + "}",
-		"multiple values":       "{" + valid + `} {}`,
+			wantDetail: `required field "longitude" is missing`,
+		},
+		"unknown field": {
+			body:       "{" + valid + `,"unexpected":true}`,
+			wantDetail: `json: unknown field "unexpected"`,
+		},
+		"out of range latitude": {
+			body:       "{" + strings.Replace(valid, `"latitude":59.9`, `"latitude":91`, 1) + "}",
+			wantDetail: "start_point.latitude must be between -90 and 90",
+		},
+		"null price": {
+			body:       "{" + strings.Replace(valid, `"price":1450`, `"price":null`, 1) + "}",
+			wantDetail: `required field "price" must not be null`,
+		},
+		"null latitude": {
+			body:       "{" + strings.Replace(valid, `"latitude":59.9`, `"latitude":null`, 1) + "}",
+			wantDetail: `required field "latitude" must not be null`,
+		},
+		"null longitude": {
+			body:       "{" + strings.Replace(valid, `"longitude":30.3`, `"longitude":null`, 1) + "}",
+			wantDetail: `required field "longitude" must not be null`,
+		},
+		"multiple values": {
+			body:       "{" + valid + `} {}`,
+			wantDetail: "Request body must contain exactly one JSON object",
+		},
 	}
 
 	handler := newTestHandler(stubService{}, &stubPinger{})
-	for name, body := range tests {
+	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(body))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()
 
@@ -114,6 +142,9 @@ func TestCreateTripRejectsInvalidBodies(t *testing.T) {
 			}
 			if problem.Code != "invalid_request" {
 				t.Fatalf("problem code = %q", problem.Code)
+			}
+			if problem.Detail == nil || *problem.Detail != test.wantDetail {
+				t.Fatalf("problem detail = %v, want %q", problem.Detail, test.wantDetail)
 			}
 		})
 	}
@@ -171,8 +202,19 @@ func TestCreateTripReturnsCreatedTrip(t *testing.T) {
 		t.Fatalf("Content-Type = %q", got)
 	}
 
+	responseBody := response.Body.Bytes()
+	var responseFields map[string]json.RawMessage
+	if err := json.Unmarshal(responseBody, &responseFields); err != nil {
+		t.Fatalf("decode response fields: %v", err)
+	}
+	for _, field := range []string{"finished_at", "last_position_at"} {
+		if got := string(responseFields[field]); got != "null" {
+			t.Fatalf("%s = %s, want null", field, got)
+		}
+	}
+
 	var result api.Trip
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(responseBody, &result); err != nil {
 		t.Fatalf("decode trip: %v", err)
 	}
 	if result.Id != tripID || result.Status != api.Active {
@@ -274,6 +316,43 @@ func TestGeneratedRouterMapsInvalidTripIDToProblem(t *testing.T) {
 	}
 	if got := response.Header().Get("Content-Type"); got != "application/problem+json" {
 		t.Fatalf("Content-Type = %q", got)
+	}
+	var problem api.Problem
+	if err := json.NewDecoder(response.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode problem: %v", err)
+	}
+	if problem.Detail == nil || !strings.Contains(*problem.Detail, "tripId") {
+		t.Fatalf("problem detail = %v, want parameter name", problem.Detail)
+	}
+}
+
+func TestInternalErrorLogIncludesRequest(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	handler := NewHandler(
+		stubService{get: func(context.Context, uuid.UUID) (trip.Trip, error) {
+			return trip.Trip{}, errors.New("database failed")
+		}},
+		&stubPinger{},
+		time.Second,
+		slog.New(slog.NewJSONHandler(&logs, nil)),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/trips/1f0a9c62-4a1c-4f2e-9d33-2a4bb0f0b111", nil)
+	response := httptest.NewRecorder()
+
+	handler.GetTrip(
+		response,
+		request,
+		uuid.MustParse("1f0a9c62-4a1c-4f2e-9d33-2a4bb0f0b111"),
+	)
+
+	var entry map[string]any
+	if err := json.NewDecoder(&logs).Decode(&entry); err != nil {
+		t.Fatalf("decode log entry: %v", err)
+	}
+	if entry["method"] != http.MethodGet || entry["path"] != request.URL.Path {
+		t.Fatalf("request fields = method:%v path:%v", entry["method"], entry["path"])
 	}
 }
 

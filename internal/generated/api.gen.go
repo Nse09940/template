@@ -82,9 +82,9 @@ type Trip struct {
 
 	// EndPoint Географические координаты WGS 84.
 	EndPoint       Coordinates        `json:"end_point"`
-	FinishedAt     *time.Time         `json:"finished_at,omitempty"`
+	FinishedAt     *time.Time         `json:"finished_at"`
 	Id             openapi_types.UUID `json:"id"`
-	LastPositionAt *time.Time         `json:"last_position_at,omitempty"`
+	LastPositionAt *time.Time         `json:"last_position_at"`
 
 	// Price Стоимость поездки в целых рублях. Это учебное упрощение: копейки не используются.
 	//

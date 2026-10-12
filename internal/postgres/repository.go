@@ -118,12 +118,10 @@ func (r *Repository) InsertStatusHistory(
 
 func (r *Repository) DeleteExpiredCreateIdempotency(
 	ctx context.Context,
-	key uuid.UUID,
 	now time.Time,
 ) error {
 	query, args, err := statementBuilder.
 		Delete("trip_create_idempotency_keys").
-		Where(sq.Eq{"idempotency_key": key}).
 		Where(sq.LtOrEq{"expires_at": now}).
 		ToSql()
 	if err != nil {
@@ -235,7 +233,7 @@ func (r *Repository) FinishActive(
 		Update("trips").
 		Set("status", string(trip.StatusCompleted)).
 		Set("finished_at", finishedAt).
-		Set("updated_at", finishedAt).
+		Set("updated_at", sq.Expr("now()")).
 		Where(sq.Eq{
 			"id":     id,
 			"status": string(trip.StatusActive),
@@ -304,5 +302,10 @@ func scanTrip(row rowScanner) (trip.Trip, error) {
 		&value.FinishedAt,
 	)
 	value.Status = trip.Status(status)
+	value.StartedAt = value.StartedAt.UTC()
+	if value.FinishedAt != nil {
+		finishedAt := value.FinishedAt.UTC()
+		value.FinishedAt = &finishedAt
+	}
 	return value, err
 }

@@ -68,7 +68,7 @@ func (h *Handler) CreateTrip(
 			http.StatusBadRequest,
 			"invalid_request",
 			"Invalid request",
-			"Request body must be valid JSON matching the contract",
+			err.Error(),
 		)
 		return
 	}
@@ -141,14 +141,14 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, api.HealthResponse{Status: api.Ok})
 }
 
-func (h *Handler) ParameterError(w http.ResponseWriter, r *http.Request, _ error) {
+func (h *Handler) ParameterError(w http.ResponseWriter, r *http.Request, err error) {
 	h.writeProblem(
 		w,
 		r,
 		http.StatusBadRequest,
 		"invalid_request",
 		"Invalid request",
-		"Request parameter validation failed",
+		err.Error(),
 	)
 }
 
@@ -191,7 +191,13 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, r *http.Request, err
 			"Idempotency-Key was already used with a different request body",
 		)
 	default:
-		h.logger.ErrorContext(r.Context(), "request failed", "error", err)
+		h.logger.ErrorContext(
+			r.Context(),
+			"request failed",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"error", err,
+		)
 		h.writeProblem(
 			w,
 			r,

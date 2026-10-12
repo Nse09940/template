@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -39,7 +40,14 @@ func (m *TxManager) Do(ctx context.Context, fn func(ctx context.Context) error) 
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			rollbackCtx, rollbackCancel := m.cleanupContext(ctx)
-			_ = tx.Rollback(rollbackCtx)
+			rollbackErr := tx.Rollback(rollbackCtx)
+			if rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+				slog.ErrorContext(
+					rollbackCtx,
+					"rollback transaction after panic failed",
+					"error", rollbackErr,
+				)
+			}
 			rollbackCancel()
 			panic(recovered)
 		}
