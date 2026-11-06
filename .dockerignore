@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+.tripgo
+.idea
+.vscode
+course-materials
+local-notes
+readme2.md
+**/*_test.go
+coverage.out
+trip-service
+trip-service.exe
