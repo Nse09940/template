@@ -1,11 +1,8 @@
-package main
+package container
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"log/slog"
 	"testing"
 	"time"
 )
@@ -68,20 +65,5 @@ func TestCloseWithinDeadlineStartsCloseAfterDeadline(t *testing.T) {
 	case <-called:
 	case <-time.After(time.Second):
 		t.Fatal("close function was not called")
-	}
-}
-
-func TestJSONLoggerIncludesService(t *testing.T) {
-	t.Parallel()
-
-	var output bytes.Buffer
-	newJSONLogger(&output, slog.LevelInfo).Error("startup failed")
-
-	var entry map[string]any
-	if err := json.NewDecoder(&output).Decode(&entry); err != nil {
-		t.Fatalf("decode log entry: %v", err)
-	}
-	if entry["service"] != serviceName {
-		t.Fatalf("service = %v, want %q", entry["service"], serviceName)
 	}
 }

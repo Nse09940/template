@@ -1,8 +1,13 @@
-# TripGo — лабораторная работа №1
+# TripGo — лабораторные работы №1 и №2
 
 TripGo — HTTP-сервис поездок из курса «Разработка микросервисов на Go».
 В первой лабораторной реализованы создание, получение и завершение поездки,
 PostgreSQL-репозитории, миграции и контекстный менеджер транзакций.
+Во второй работе добавлены слои, gomock-тесты, интеграционные проверки,
+golangci-lint и OpenTelemetry.
+
+Подробный разбор второй работы и ответы для защиты находятся в
+[LAB2_DOCUMENTATION.md](LAB2_DOCUMENTATION.md).
 
 ## Требования
 
@@ -10,6 +15,8 @@ PostgreSQL-репозитории, миграции и контекстный м
 - утилита `tripgoctl` из
   [course-infra](https://github.com/course-go-autumn-2026/course-infra);
 - GNU Make;
+- golangci-lint v2.15.0 для `make lint`;
+- C-компилятор для `go test -race`;
 - Docker — для сборки и запуска контейнера.
 
 ## Быстрый старт
@@ -51,14 +58,15 @@ curl -sS http://localhost:8080/ready
 
 | Команда | Назначение |
 |---|---|
-| `make generate` | сгенерировать модели и chi-интерфейсы из OpenAPI |
+| `make generate` | сгенерировать OpenAPI-код и gomock-моки |
 | `make migrate` | применить все миграции |
 | `make migrate-down` | откатить последнюю миграцию |
 | `make run` | запустить сервис |
 | `make build` | проверить сборку всех пакетов |
-| `make docker-build` | собрать образ `trip-service:lab1` |
-| `make test` | запустить тесты с race detector |
-| `make lint` | запустить `go vet` |
+| `make docker-build` | собрать образ `trip-service:lab2` |
+| `make test` | unit-тесты с `-race -count=2`, покрытие в терминале и `coverage.out` |
+| `make test-integration` | PostgreSQL-тесты с `-race -count=2` |
+| `make lint` | golangci-lint, проверка слоёв и форматирования |
 
 ## Переменные окружения
 
@@ -80,7 +88,7 @@ curl -sS http://localhost:8080/ready
 | `DATABASE_CONNECT_TIMEOUT` | таймаут подключения и стартового Ping |
 | `DATABASE_QUERY_TIMEOUT` | таймаут запроса и транзакции |
 
-Все переменные обязательны. При пропущенном или некорректном значении сервис
+Переменные HTTP и PostgreSQL обязательны. При пропущенном или некорректном значении сервис
 завершается на старте с понятной ошибкой.
 
 ## HTTP API
@@ -169,8 +177,7 @@ CREATE UNIQUE INDEX trips_one_active_per_driver_idx
 кода, Go toolchain, кеша сборки и shell.
 
 `.dockerignore` исключает `.git`, тесты, `.env`, `.tripgo`, настройки IDE и
-локальные материалы. Размер итогового образа для `linux/amd64`, измеренный через
-`docker image inspect`, — **4.54 MiB**.
+локальные материалы.
 
 Сборка:
 
@@ -195,7 +202,7 @@ docker run --rm -p 8080:8080 \
   --env-file .env.example \
   --env-file .env \
   --env "DATABASE_URL=${DATABASE_URL/localhost/host.docker.internal}" \
-  trip-service:lab1
+  trip-service:lab2
 ```
 
 В Linux с обычным Docker Engine имя `host.docker.internal` по умолчанию не
@@ -206,7 +213,7 @@ docker run --rm -p 8080:8080 \
 docker run --rm --network host \
   --env-file .env.example \
   --env-file .env \
-  trip-service:lab1
+  trip-service:lab2
 ```
 
 С `--network host` публиковать порт через `-p` не требуется: сервис слушает
@@ -217,3 +224,119 @@ docker run --rm --network host \
 ```bash
 curl -i http://localhost:8080/ready
 ```
+
+
+## Архитектура
+
+```mermaid
+flowchart LR
+    Main[cmd/trip-service] --> Container[container]
+    Container --> HTTP[http/trip/create,get,finish]
+    Container --> Usecase[usecase/trip/create,get,finish]
+    Container --> Repo[repository/trip]
+    Container --> Infra[infra/postgres,telemetry]
+    HTTP --> Usecase
+    Usecase --> Domain[domain/trip и model]
+    Repo --> Domain
+    Repo --> Infra
+```
+
+`main` читает конфигурацию, вызывает `container.New`, запускает сервис и
+обрабатывает сигнал завершения. `container` — единственная точка сборки production
+зависимостей, включая пул, менеджер транзакций, репозитории, usecase и хендлеры.
+Сохранено имя `cmd/trip-service` из первой работы для существующих команд запуска.
+
+У каждого действия свой пакет транспорта и usecase. Неэкспортируемые интерфейсы
+в `contract.go` принадлежат потребителю. Usecase знает необходимые методы
+репозитория, менеджера транзакций и наблюдателя бизнес-событий. HTTP знает
+интерфейс usecase. Реализации связываются вручную в контейнере. `model.Trip` и
+`model.Coordinates` — алиасы доменных типов для обмена между слоями.
+
+`domain/trip` проверяет UUID, координаты, цену и переход `Finish`.
+`http/domainerror` содержит единый маппинг ошибок в RFC 9457 Problem. Для
+неизвестной ошибки клиент получает `internal_error` с безопасным описанием,
+а исходная причина попадает в журнал запроса. `depguard` закрепляет запреты
+зависимостей из задания, включая импорт инфраструктуры в транспорт.
+
+Создание и завершение работают внутри `TxManager.Do`. Завершение сначала
+применяет доменное правило, затем выполняет условный
+`UPDATE ... WHERE status = 'active'`. Гонка двух завершений даёт один успех и
+один `trip_completed`. Счётчики и бизнес-логи записываются после commit.
+Повтор по `Idempotency-Key` не увеличивает число созданных поездок.
+
+## Проверки второй работы
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+# Добавить $(go env GOPATH)/bin в PATH.
+make generate
+make lint
+make test
+
+tripgoctl environment start
+tripgoctl connect
+make test-integration
+```
+
+`make test-integration` требует доступный `DATABASE_URL` из `.env`. Каждый тест
+создаёт отдельную схему с уникальным именем, применяет три исходные миграции и
+удаляет схему при завершении. Проверяются сохранение и чтение, занятый водитель,
+повторное завершение, отсутствующая поездка, полный откат записей в двух
+таблицах при настоящем нарушении CHECK, rollback после отмены и panic,
+параллельные создания, завершения и повторы ключа идемпотентности.
+
+Unit-зависимости мокируются через `gomock`, а `mocks_test.go` генерируются
+через `go:generate` рядом с потребителем. Порог задания 50% относится к домену
+и usecase. `make test` печатает покрытие всех пакетов, включая сгенерированный
+код и точку сборки приложения.
+
+## Наблюдаемость
+
+`environment.toml` использует `lab = 2` и компоненты `postgres`, `observability`.
+Адреса PostgreSQL и OTLP берутся из `.env`, ссылки на UI — из `tripgoctl connect`.
+
+| Переменная | Значение из `.env.example` |
+|---|---|
+| `OTEL_SERVICE_NAME` | `trip-service` |
+| `OTEL_RESOURCE_ATTRIBUTES` | `service.namespace=tripgo,deployment.environment=local` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318`, заменяется окружением |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf`, также поддерживается `grpc` |
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` |
+| `OTEL_TRACES_SAMPLER_ARG` | необязательный аргумент sampler |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `3000`, миллисекунды |
+| `OTEL_BSP_EXPORT_TIMEOUT` | `3000`, миллисекунды |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `5000`, миллисекунды |
+| `OTEL_METRIC_EXPORT_TIMEOUT` | `3000`, миллисекунды |
+
+Провайдеры SDK передаются зависимостями. Единственный SDK-wide hook — обработчик
+внутренних ошибок OTel, направляющий их в JSON slog. Resource включает версию
+сборки. Используется W3C TraceContext. Асинхронный экспорт позволяет продолжать
+обслуживание при недоступном коллекторе. При остановке HTTP сначала завершается,
+затем сбрасываются сигналы телеметрии и закрывается PostgreSQL.
+
+Цепочка HTTP — `Recover → Tracing → Logging → Metrics → router`.
+Ответ буферизуется, поэтому panic после частичной записи заменяет тело
+на `500 internal_error`. На запрос записывается один `request handled` с
+шаблоном маршрута, статусом, временем и `trace_id`/`span_id`. Для panic дополнительно
+пишется stack trace. Создание и завершение имеют отдельные бизнес-события.
+
+На пуле стоит `otelpgx` с дополнением атрибутов таблицы и метрик в
+`infra/postgres`. SQL-параметры в спаны не попадают. Репозитории не зависят от OTel.
+Для текущих запросов распознаются три таблицы сервиса. В атрибутах HTTP только
+шаблоны маршрутов, что ограничивает число временных рядов.
+
+Экспортируются `http.server.request.duration` (histogram, секунды),
+`http.server.active_requests` (up-down counter),
+`db.client.operation.duration` (histogram, секунды),
+`tripgo.trips.created` и `tripgo.trips.completed` (counter).
+Дополнительно из `docs/observability.md` курса реализован `tripgo.trips.active`
+(observable gauge, актуальное число активных поездок в PostgreSQL).
+
+Для проверки отправьте создание, чтение и завершение поездки из примера выше,
+найдите трейс `POST /api/v1/trips` в Jaeger, затем найдите тот же `trace_id`
+в JSON-логе. В Grafana Explore выберите Prometheus и запросите
+`http_server_request_duration_seconds_count`, `tripgo_trips_created_total`,
+`db_client_operation_duration_seconds_count`. Перцентили доступны через
+`histogram_quantile` и ряды с суффиксом `_bucket`.
+
+Материалы для описания PR и скриншоты находятся в [docs/lab2](docs/lab2/README.md).

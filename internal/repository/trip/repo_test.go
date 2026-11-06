@@ -1,11 +1,12 @@
-package postgres
+package trip
 
 import (
 	"testing"
 	"time"
 
-	"github.com/Nse09940/template/internal/trip"
 	"github.com/google/uuid"
+
+	"github.com/Nse09940/template/internal/domain/trip"
 )
 
 type stubTripRow struct {

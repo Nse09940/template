@@ -1,4 +1,4 @@
-package postgres
+package transaction
 
 import (
 	"context"
@@ -16,14 +16,15 @@ type txContextKey struct{}
 type TxManager struct {
 	pool    *pgxpool.Pool
 	timeout time.Duration
+	logger  *slog.Logger
 }
 
-func NewTxManager(pool *pgxpool.Pool, timeout time.Duration) *TxManager {
-	return &TxManager{pool: pool, timeout: timeout}
+func NewTxManager(pool *pgxpool.Pool, timeout time.Duration, logger *slog.Logger) *TxManager {
+	return &TxManager{pool: pool, timeout: timeout, logger: logger}
 }
 
 func (m *TxManager) Do(ctx context.Context, fn func(ctx context.Context) error) (err error) {
-	if transactionFromContext(ctx) != nil {
+	if FromContext(ctx) != nil {
 		return fn(ctx)
 	}
 
@@ -42,7 +43,7 @@ func (m *TxManager) Do(ctx context.Context, fn func(ctx context.Context) error) 
 			rollbackCtx, rollbackCancel := m.cleanupContext(ctx)
 			rollbackErr := tx.Rollback(rollbackCtx)
 			if rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
-				slog.ErrorContext(
+				m.logger.ErrorContext(
 					rollbackCtx,
 					"rollback transaction after panic failed",
 					"error", rollbackErr,
@@ -74,7 +75,7 @@ func (m *TxManager) cleanupContext(parent context.Context) (context.Context, con
 	return context.WithTimeout(context.WithoutCancel(parent), m.timeout)
 }
 
-func transactionFromContext(ctx context.Context) pgx.Tx {
+func FromContext(ctx context.Context) pgx.Tx {
 	tx, _ := ctx.Value(txContextKey{}).(pgx.Tx)
 	return tx
 }
