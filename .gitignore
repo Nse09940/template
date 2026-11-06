@@ -5,12 +5,18 @@
 
 # Local environment
 .env
+.env.*
+!.env.example
 .tripgo/
 
-# Personal documentation
+# Local course material and personal notes
 /local-notes/
 /course-materials/
 /readme2.md
+/doc.md
+/LAB1_DOCUMENTATION.md
+/LAB1_REVIEW_FIXES.md
+/LAB2_TASK.md
 
 # IDE and OS
 .idea/
@@ -20,3 +26,6 @@ Thumbs.db
 
 # Test artifacts
 coverage.out
+/coverage.html
+*.test
+*.test.exe

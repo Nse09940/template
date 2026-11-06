@@ -1,4 +1,4 @@
-package postgres
+package trip
 
 import (
 	"context"
@@ -8,21 +8,21 @@ import (
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
-	"github.com/Nse09940/template/internal/trip"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Nse09940/template/internal/domain/trip"
+	"github.com/Nse09940/template/internal/infra/postgres/transaction"
+	"github.com/Nse09940/template/internal/model"
 )
+
+const statusColumn = "status"
 
 const activeDriverConstraint = "trips_one_active_per_driver_idx"
 
 var statementBuilder = sq.StatementBuilder.PlaceholderFormat(sq.Dollar)
-
-type dbExecutor interface {
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
 
 type Repository struct {
 	pool         *pgxpool.Pool
@@ -33,7 +33,7 @@ func NewRepository(pool *pgxpool.Pool, queryTimeout time.Duration) *Repository {
 	return &Repository{pool: pool, queryTimeout: queryTimeout}
 }
 
-func (r *Repository) Insert(ctx context.Context, value trip.Trip) error {
+func (r *Repository) Insert(ctx context.Context, value model.Trip) error {
 	query, args, err := statementBuilder.
 		Insert("trips").
 		Columns(
@@ -45,7 +45,7 @@ func (r *Repository) Insert(ctx context.Context, value trip.Trip) error {
 			"end_latitude",
 			"end_longitude",
 			"price",
-			"status",
+			statusColumn,
 			"started_at",
 			"finished_at",
 		).
@@ -176,38 +176,38 @@ func (r *Repository) TryReserveCreateIdempotency(
 func (r *Repository) GetCreateIdempotency(
 	ctx context.Context,
 	key uuid.UUID,
-) (trip.CreateIdempotency, error) {
+) (model.CreateIdempotency, error) {
 	query, args, err := statementBuilder.
 		Select("request_hash", "trip_id").
 		From("trip_create_idempotency_keys").
 		Where(sq.Eq{"idempotency_key": key}).
 		ToSql()
 	if err != nil {
-		return trip.CreateIdempotency{}, fmt.Errorf("build get idempotency key query: %w", err)
+		return model.CreateIdempotency{}, fmt.Errorf("build get idempotency key query: %w", err)
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
 	defer cancel()
 
-	var stored trip.CreateIdempotency
+	var stored model.CreateIdempotency
 	if err := r.executor(ctx).QueryRow(queryCtx, query, args...).Scan(
 		&stored.RequestHash,
 		&stored.TripID,
 	); err != nil {
-		return trip.CreateIdempotency{}, fmt.Errorf("scan idempotency key row: %w", err)
+		return model.CreateIdempotency{}, fmt.Errorf("scan idempotency key row: %w", err)
 	}
 
 	return stored, nil
 }
 
-func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (trip.Trip, error) {
+func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (model.Trip, error) {
 	query, args, err := statementBuilder.
 		Select(tripColumns()...).
 		From("trips").
 		Where(sq.Eq{"id": id}).
 		ToSql()
 	if err != nil {
-		return trip.Trip{}, fmt.Errorf("build get trip query: %w", err)
+		return model.Trip{}, fmt.Errorf("build get trip query: %w", err)
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
@@ -215,10 +215,10 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (trip.Trip, erro
 
 	found, err := scanTrip(r.executor(ctx).QueryRow(queryCtx, query, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return trip.Trip{}, trip.ErrNotFound
+		return model.Trip{}, trip.ErrTripNotFound
 	}
 	if err != nil {
-		return trip.Trip{}, fmt.Errorf("scan get trip row: %w", err)
+		return model.Trip{}, fmt.Errorf("scan get trip row: %w", err)
 	}
 
 	return found, nil
@@ -228,20 +228,20 @@ func (r *Repository) FinishActive(
 	ctx context.Context,
 	id uuid.UUID,
 	finishedAt time.Time,
-) (trip.Trip, error) {
+) (model.Trip, error) {
 	query, args, err := statementBuilder.
 		Update("trips").
-		Set("status", string(trip.StatusCompleted)).
+		Set(statusColumn, string(trip.StatusCompleted)).
 		Set("finished_at", finishedAt).
 		Set("updated_at", sq.Expr("now()")).
 		Where(sq.Eq{
-			"id":     id,
-			"status": string(trip.StatusActive),
+			"id":         id,
+			statusColumn: string(trip.StatusActive),
 		}).
 		Suffix("RETURNING " + strings.Join(tripColumns(), ", ")).
 		ToSql()
 	if err != nil {
-		return trip.Trip{}, fmt.Errorf("build finish trip query: %w", err)
+		return model.Trip{}, fmt.Errorf("build finish trip query: %w", err)
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, r.queryTimeout)
@@ -249,17 +249,17 @@ func (r *Repository) FinishActive(
 
 	finished, err := scanTrip(r.executor(ctx).QueryRow(queryCtx, query, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return trip.Trip{}, trip.ErrNotFound
+		return model.Trip{}, trip.ErrTripNotFound
 	}
 	if err != nil {
-		return trip.Trip{}, fmt.Errorf("scan finished trip row: %w", err)
+		return model.Trip{}, fmt.Errorf("scan finished trip row: %w", err)
 	}
 
 	return finished, nil
 }
 
 func (r *Repository) executor(ctx context.Context) dbExecutor {
-	if tx := transactionFromContext(ctx); tx != nil {
+	if tx := transaction.FromContext(ctx); tx != nil {
 		return tx
 	}
 	return r.pool
@@ -275,18 +275,14 @@ func tripColumns() []string {
 		"end_latitude",
 		"end_longitude",
 		"price",
-		"status",
+		statusColumn,
 		"started_at",
 		"finished_at",
 	}
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanTrip(row rowScanner) (trip.Trip, error) {
-	var value trip.Trip
+func scanTrip(row rowScanner) (model.Trip, error) {
+	var value model.Trip
 	var status string
 	err := row.Scan(
 		&value.ID,
