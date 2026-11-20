@@ -73,7 +73,7 @@ func queryAttributes(sql string) (string, string) {
 			if i+1 < len(fields) {
 				candidate := strings.Trim(fields[i+1], `"`)
 				switch candidate {
-				case "trips", "trip_status_history", "trip_create_idempotency_keys":
+				case "trips", "trip_status_history", "trip_create_idempotency_keys", "trip_positions":
 					collection = candidate
 				}
 				return operation, collection

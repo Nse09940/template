@@ -19,3 +19,12 @@ func Trip(value model.Trip) api.Trip {
 		LastPositionAt: value.LastPositionAt,
 	}
 }
+
+func Position(value model.Position) api.TripPosition {
+	return api.TripPosition{
+		Id:          value.ID,
+		TripId:      value.TripID,
+		Coordinates: api.Coordinates(value.Coordinates),
+		RecordedAt:  value.RecordedAt,
+	}
+}

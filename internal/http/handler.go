@@ -12,21 +12,38 @@ import (
 	"github.com/Nse09940/template/internal/http/requeststate"
 	"github.com/Nse09940/template/internal/http/respond"
 	"github.com/Nse09940/template/internal/http/trip/create"
+	"github.com/Nse09940/template/internal/http/trip/createposition"
 	"github.com/Nse09940/template/internal/http/trip/finish"
 	"github.com/Nse09940/template/internal/http/trip/get"
+	"github.com/Nse09940/template/internal/http/trip/listpositions"
 )
 
 type Handler struct {
 	*create.Handler
-	GetHandler    *get.Handler
-	FinishHandler *finish.Handler
-	database      pinger
-	timeout       time.Duration
-	response      respond.Writer
+	GetHandler            *get.Handler
+	FinishHandler         *finish.Handler
+	CreatePositionHandler *createposition.Handler
+	ListPositionsHandler  *listpositions.Handler
+	database              pinger
+	timeout               time.Duration
+	response              respond.Writer
 }
 
-func NewHandler(c *create.Handler, g *get.Handler, f *finish.Handler, db pinger, timeout time.Duration, logger *slog.Logger) *Handler {
-	return &Handler{Handler: c, GetHandler: g, FinishHandler: f, database: db, timeout: timeout, response: respond.Writer{Logger: logger}}
+func NewHandler(
+	c *create.Handler,
+	g *get.Handler,
+	f *finish.Handler,
+	createPosition *createposition.Handler,
+	listPositions *listpositions.Handler,
+	db pinger,
+	timeout time.Duration,
+	logger *slog.Logger,
+) *Handler {
+	return &Handler{
+		Handler: c, GetHandler: g, FinishHandler: f,
+		CreatePositionHandler: createPosition, ListPositionsHandler: listPositions,
+		database: db, timeout: timeout, response: respond.Writer{Logger: logger},
+	}
 }
 
 func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, id api.TripId) {
@@ -35,6 +52,14 @@ func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, id api.TripId)
 
 func (h *Handler) FinishTrip(w http.ResponseWriter, r *http.Request, id api.TripId) {
 	h.FinishHandler.FinishTrip(w, r, id)
+}
+
+func (h *Handler) CreateTripPosition(w http.ResponseWriter, r *http.Request, id api.TripId) {
+	h.CreatePositionHandler.CreateTripPosition(w, r, id)
+}
+
+func (h *Handler) ListTripPositions(w http.ResponseWriter, r *http.Request, id api.TripId) {
+	h.ListPositionsHandler.ListTripPositions(w, r, id)
 }
 
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {

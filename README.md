@@ -1,46 +1,40 @@
-# TripGo — лабораторные работы №1 и №2
+# TripGo
 
-TripGo — HTTP-сервис поездок из курса «Разработка микросервисов на Go».
-В первой лабораторной реализованы создание, получение и завершение поездки,
-PostgreSQL-репозитории, миграции и контекстный менеджер транзакций.
-Во второй работе добавлены слои, gomock-тесты, интеграционные проверки,
-golangci-lint и OpenTelemetry.
+TripGo — учебный HTTP-сервис на Go. Он создаёт и завершает поездки, хранит
+координаты водителя в PostgreSQL и отдаёт маршрут. Если по активной поездке
+давно не было координат, сервис просит устройство прислать новую точку через
+Push Service. Это основная задача лабораторной № 3.
 
-Подробный разбор второй работы и ответы для защиты находятся в
-[LAB2_DOCUMENTATION.md](LAB2_DOCUMENTATION.md).
+## Запуск
 
-## Требования
+Понадобятся Go 1.26 или новее, Docker, GNU Make и утилита `tripgoctl` из
+[course-infra](https://github.com/course-go-autumn-2026/course-infra).
 
-- Go 1.26 или новее;
-- утилита `tripgoctl` из
-  [course-infra](https://github.com/course-go-autumn-2026/course-infra);
-- GNU Make;
-- golangci-lint v2.15.0 для `make lint`;
-- C-компилятор для `go test -race`;
-- Docker — для сборки и запуска контейнера.
-
-## Быстрый старт
+Из корня репозитория поднимите окружение и примените миграции.
 
 ```bash
 tripgoctl cluster start
 tripgoctl environment start
-tripgoctl connect
-
 make migrate
 make run
 ```
 
-`tripgoctl environment start` читает корневой
-[`environment.toml`](environment.toml) и создаёт локальный `.env`. Makefile
-сначала загружает безопасные значения из `.env.example`, затем адреса окружения
-из `.env`. Значения из окружения shell имеют приоритет над обоими файлами, а
-аргументы вида `make run SHUTDOWN_TIMEOUT=2s` — над всеми источниками. Сервис по
-умолчанию доступен на `http://localhost:8080`.
+Команда `tripgoctl environment start` поднимет PostgreSQL, Push Service и
+инструменты наблюдаемости, а адреса запишет в локальный `.env`. Посмотреть эти
+адреса и ссылки на Grafana и Jaeger можно командой `tripgoctl connect`.
 
-Проверка:
+В другом терминале проверьте, что сервис подключился к базе.
 
 ```bash
-curl -sS -X POST http://localhost:8080/api/v1/trips \
+curl -fsS http://localhost:8080/ready
+```
+
+## Проверка координат и пушей
+
+Создайте поездку. Для следующих команд подставьте поле `id` из ответа в `TRIP_ID`.
+
+```bash
+curl -fsS -X POST http://localhost:8080/api/v1/trips \
   -H 'Content-Type: application/json' \
   -d '{
     "user_id": "5cb72c04-7650-45c9-a79b-bcdba0631e0c",
@@ -49,294 +43,147 @@ curl -sS -X POST http://localhost:8080/api/v1/trips \
     "end_point": {"latitude": 59.9290, "longitude": 30.3626},
     "price": 1450
   }'
-
-curl -sS http://localhost:8080/health
-curl -sS http://localhost:8080/ready
 ```
 
-## Команды
-
-| Команда | Назначение |
-|---|---|
-| `make generate` | сгенерировать OpenAPI-код и gomock-моки |
-| `make migrate` | применить все миграции |
-| `make migrate-down` | откатить последнюю миграцию |
-| `make run` | запустить сервис |
-| `make build` | проверить сборку всех пакетов |
-| `make docker-build` | собрать образ `trip-service:lab2` |
-| `make test` | unit-тесты с `-race -count=2`, покрытие в терминале и `coverage.out` |
-| `make test-integration` | PostgreSQL-тесты с `-race -count=2` |
-| `make lint` | golangci-lint, проверка слоёв и форматирования |
-
-## Переменные окружения
-
-Полный пример находится в [`.env.example`](.env.example).
-
-| Переменная | Назначение |
-|---|---|
-| `HTTP_ADDR` | адрес HTTP-сервера |
-| `HTTP_READ_TIMEOUT` | максимальное время чтения запроса |
-| `HTTP_READ_HEADER_TIMEOUT` | максимальное время чтения заголовков |
-| `HTTP_WRITE_TIMEOUT` | максимальное время записи ответа |
-| `HTTP_IDLE_TIMEOUT` | таймаут keep-alive соединения |
-| `LOG_LEVEL` | уровень JSON-логов: debug, info, warn или error |
-| `SHUTDOWN_TIMEOUT` | общий бюджет graceful shutdown |
-| `DATABASE_URL` | DSN PostgreSQL |
-| `DATABASE_MAX_CONNS` | максимальный размер пула |
-| `DATABASE_MIN_CONNS` | минимальный размер пула |
-| `DATABASE_MAX_CONN_LIFETIME` | максимальное время жизни соединения |
-| `DATABASE_CONNECT_TIMEOUT` | таймаут подключения и стартового Ping |
-| `DATABASE_QUERY_TIMEOUT` | таймаут запроса и транзакции |
-
-Переменные HTTP и PostgreSQL обязательны. При пропущенном или некорректном значении сервис
-завершается на старте с понятной ошибкой.
-
-## HTTP API
-
-| Метод | Путь | Назначение |
-|---|---|---|
-| `POST` | `/api/v1/trips` | создать поездку |
-| `GET` | `/api/v1/trips/{tripId}` | получить поездку |
-| `POST` | `/api/v1/trips/{tripId}/finish` | завершить поездку |
-| `GET` | `/health` | проверить, что процесс жив |
-| `GET` | `/ready` | проверить доступность PostgreSQL |
-
-Успешные ответы имеют `Content-Type: application/json`. Ошибки возвращаются в
-формате RFC 9457 с `Content-Type: application/problem+json` и стабильным полем
-`code`.
-
-## Принятые решения
-
-### Запрет двух активных поездок
-
-Инвариант закреплён частичным уникальным индексом:
-
-```sql
-CREATE UNIQUE INDEX trips_one_active_per_driver_idx
-    ON trips (driver_id)
-    WHERE status = 'active';
-```
-
-Поэтому два конкурентных `POST /api/v1/trips` для одного водителя не могут
-создать две активные поездки. Ошибка PostgreSQL `23505` по этому индексу
-преобразуется в доменную ошибку `driver_busy` и HTTP `409`.
-
-### Идемпотентное создание поездки
-
-Клиент может передать UUID в заголовке `Idempotency-Key`. Ключ действует 24
-часа. Сервис хранит в PostgreSQL SHA-256 нормализованного тела запроса, `trip_id`
-и время истечения ключа.
-
-Первый запрос резервирует ключ и создаёт поездку в одной транзакции. Повтор с
-тем же ключом и телом возвращает ту же поездку с HTTP `200`; с другим телом —
-`409 idempotency_conflict`. Без заголовка создание работает как обычно и
-возвращает `201`.
-
-Резервирование выполняется до вставки поездки. Внешний ключ на заранее
-сгенерированный `trip_id` объявлен `DEFERRABLE INITIALLY DEFERRED`, поэтому он
-проверяется при commit. Параллельные запросы с одним ключом блокируются на его
-уникальном индексе: один создаёт поездку, остальные после commit читают её и не
-создают дубликаты. Перед резервированием нового ключа сервис удаляет все истёкшие
-записи по индексу `expires_at`.
-
-### Менеджер транзакций
-
-`TxManager.Do` открывает транзакцию, помещает её в `context.Context` и
-вызывает бизнес-функцию с новым контекстом. Репозиторий сам выбирает исполнитель:
-транзакцию из контекста либо обычный пул. Поэтому бизнес-код не импортирует
-`pgx` и не передаёт транзакции аргументами.
-
-При `nil` выполняется commit, при ошибке или panic — rollback. Вложенный
-`Do` переиспользует текущую транзакцию. Создание поездки и начальная запись
-`trip_status_history` выполняются атомарно.
-
-Использован уровень изоляции `READ COMMITTED`: он достаточен, поскольку
-конкурентный запрет активных поездок обеспечивает уникальный индекс, а
-завершение защищено условным атомарным
-`UPDATE ... WHERE status = 'active'`. Более строгая изоляция добавила бы
-конфликты и повторы без дополнительной гарантии для этих операций.
-
-### Конкурентное завершение
-
-Завершение меняет только строку со статусом `active` и возвращает её через
-`RETURNING`. При двух одновременных запросах обновление выполнит только один.
-Второй запрос увидит уже завершённую поездку и получит `409 trip_completed`;
-`finished_at` не перезаписывается.
-
-### Health и readiness
-
-`/health` не обращается к базе и сообщает только о жизни процесса. `/ready`
-выполняет `Ping` PostgreSQL с таймаутом и возвращает `503`, если сервис пока
-не способен обслуживать запросы.
-
-## Docker
-
-Образ собирается в два этапа. В builder-слое компилируется статический Go-бинарь
-с `CGO_ENABLED=0`; в итоговый слой `distroless/static-debian12:nonroot` копируется
-только бинарь. Процесс запускается как `nonroot:nonroot`. В образе нет исходного
-кода, Go toolchain, кеша сборки и shell.
-
-`.dockerignore` исключает `.git`, тесты, `.env`, `.tripgo`, настройки IDE и
-локальные материалы.
-
-Сборка:
+Отправьте координату с текущим временем и прочитайте маршрут.
 
 ```bash
-make docker-build
+TRIP_ID='вставьте UUID из ответа'
+ROUTE="http://localhost:8080/api/v1/trips/$TRIP_ID/positions"
+
+curl -fsS -X POST "$ROUTE" -H 'Content-Type: application/json' --data-binary @- <<JSON
+{
+  "coordinates": {"latitude": 59.935, "longitude": 30.335},
+  "recorded_at": "$(date -u +%FT%TZ)"
+}
+JSON
+
+curl -fsS "$ROUTE"
 ```
 
-PostgreSQL сначала запускается через `tripgoctl`, миграции применяются с хоста:
+Прекратите отправлять координаты. При настройках по умолчанию точка устареет
+через минуту, и на одном из следующих тиков в логах Push Service появится
+`REQUEST_POSITION` для водителя этой поездки.
 
 ```bash
-tripgoctl environment start
-make migrate
+tripgoctl environment logs push-service
 ```
 
-В Docker Desktop для macOS и Windows адрес `localhost` из `.env` заменяется на
-специальное имя хоста `host.docker.internal`:
+Завершите поездку, чтобы остановить опрос и снова использовать того же водителя
+в примере.
 
 ```bash
-DATABASE_URL="$(sed -n 's/^DATABASE_URL=//p' .env)"
-
-docker run --rm -p 8080:8080 \
-  --env-file .env.example \
-  --env-file .env \
-  --env "DATABASE_URL=${DATABASE_URL/localhost/host.docker.internal}" \
-  trip-service:lab2
+curl -fsS -X POST "http://localhost:8080/api/v1/trips/$TRIP_ID/finish"
 ```
 
-В Linux с обычным Docker Engine имя `host.docker.internal` по умолчанию не
-резолвится. Контейнер можно запустить в сети хоста: тогда PostgreSQL окружения
-доступен по исходному адресу `localhost`, а подменять `DATABASE_URL` не нужно:
-
-```bash
-docker run --rm --network host \
-  --env-file .env.example \
-  --env-file .env \
-  trip-service:lab2
-```
-
-С `--network host` публиковать порт через `-p` не требуется: сервис слушает
-порт `8080` непосредственно на хосте.
-
-Проверка контейнера:
-
-```bash
-curl -i http://localhost:8080/ready
-```
-
-
-## Архитектура
+## Опрос устаревших поездок
 
 ```mermaid
 flowchart LR
-    Main[cmd/trip-service] --> Container[container]
-    Container --> HTTP[http/trip/create,get,finish]
-    Container --> Usecase[usecase/trip/create,get,finish]
-    Container --> Repo[repository/trip]
-    Container --> Infra[infra/postgres,telemetry]
-    HTTP --> Usecase
-    Usecase --> Domain[domain/trip и model]
-    Repo --> Domain
-    Repo --> Infra
+    DB[(PostgreSQL)] --> Scanner[Сканер]
+    Scanner --> Queue[FIFO-очередь]
+    Queue --> Workers[Воркеры]
+    Workers --> Push[Push Service]
 ```
 
-`main` читает конфигурацию, вызывает `container.New`, запускает сервис и
-обрабатывает сигнал завершения. `container` — единственная точка сборки production
-зависимостей, включая пул, менеджер транзакций, репозитории, usecase и хендлеры.
-Сохранено имя `cmd/trip-service` из первой работы для существующих команд запуска.
+Сканер по таймеру одним SQL-запросом выбирает активные поездки, у которых давно
+не было координат. Если точек ещё нет, он отсчитывает время от начала поездки.
+В очередь первыми идут поездки, по которым координат нет дольше всего. Под эту
+выборку есть частичный индекс.
 
-У каждого действия свой пакет транспорта и usecase. Неэкспортируемые интерфейсы
-в `contract.go` принадлежат потребителю. Usecase знает необходимые методы
-репозитория, менеджера транзакций и наблюдателя бизнес-событий. HTTP знает
-интерфейс usecase. Реализации связываются вручную в контейнере. `model.Trip` и
-`model.Coordinates` — алиасы доменных типов для обмена между слоями.
+В очереди и в работе может быть только одна задача на поездку. Если очередь
+заполнена, сканер записывает предупреждение, увеличивает счётчик `dropped` и
+переходит к следующей поездке. Если точка так и не пришла, поездка снова попадёт
+в выборку на следующем тике.
 
-`domain/trip` проверяет UUID, координаты, цену и переход `Finish`.
-`http/domainerror` содержит единый маппинг ошибок в RFC 9457 Problem. Для
-неизвестной ошибки клиент получает `internal_error` с безопасным описанием,
-а исходная причина попадает в журнал запроса. `depguard` закрепляет запреты
-зависимостей из задания, включая импорт инфраструктуры в транспорт.
+Сервис записывает точку и обновляет `last_position_at` в одной транзакции.
+Опоздавшая точка остаётся в маршруте, а отметка хранит время самой свежей точки.
+После успешной записи сервис отменяет ожидающий пуш по этой поездке.
 
-Создание и завершение работают внутри `TxManager.Do`. Завершение сначала
-применяет доменное правило, затем выполняет условный
-`UPDATE ... WHERE status = 'active'`. Гонка двух завершений даёт один успех и
-один `trip_completed`. Счётчики и бизнес-логи записываются после commit.
-Повтор по `Idempotency-Key` не увеличивает число созданных поездок.
+При остановке сервис дожидается текущих HTTP-запросов, останавливает сканер и
+даёт воркерам доработать очередь в пределах общего таймаута. Затем закрывает
+соединения с Push Service и PostgreSQL. После перезапуска сканер снова берёт
+устаревшие поездки из базы.
 
-## Проверки второй работы
+| Переменная | По умолчанию | Что меняет |
+|---|---|---|
+| `POSITION_CHECK_INTERVAL` | `30s` | Как часто сканер проверяет поездки |
+| `POSITION_STALE_AFTER` | `60s` | Через сколько времени точка устаревает |
+| `POSITION_WORKERS` | `4` | Сколько воркеров отправляют пуши |
+| `POSITION_QUEUE_SIZE` | `100` | Сколько задач может ждать в очереди |
+| `PUSH_HTTP_URL` | Из `.env` окружения | Куда отправлять запросы Push Service |
+| `PUSH_REQUEST_TIMEOUT` | `1s` | Сколько ждать ответа на один запрос |
+| `SHUTDOWN_TIMEOUT` | `10s` | Общий бюджет остановки |
+
+Полный список настроек есть в [`.env.example`](.env.example). При запуске через
+Make значения из `.env` перекрывают пример. Затем идут переменные shell и
+аргументы Make. Например, `make run POSITION_CHECK_INTERVAL=10s` меняет период
+сканирования для одного запуска.
+
+## HTTP API
+
+| Метод и путь | Что делает |
+|---|---|
+| `POST /api/v1/trips` | Создаёт поездку |
+| `GET /api/v1/trips/{tripId}` | Возвращает поездку |
+| `POST /api/v1/trips/{tripId}/finish` | Завершает поездку |
+| `POST /api/v1/trips/{tripId}/positions` | Сохраняет точку активной поездки |
+| `GET /api/v1/trips/{tripId}/positions` | Возвращает точки по времени записи, при совпадении времени — по `id` |
+| `GET /health` | Проверяет, что процесс жив |
+| `GET /ready` | Проверяет соединение с PostgreSQL, при ошибке возвращает `503` |
+
+У водителя может быть одна активная поездка. Если передать `Idempotency-Key`
+при создании, в течение 24 часов повтор с тем же ключом и телом вернёт исходную
+поездку. Ошибки приходят в формате `application/problem+json` с
+машиночитаемым полем `code`. Форматы запросов и ответов описаны в
+[OpenAPI-контракте](contracts/openapi/trip-service.openapi.yaml).
+
+## Тесты и метрики
 
 ```bash
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
-# Добавить $(go env GOPATH)/bin в PATH.
-make generate
-make lint
 make test
-
-tripgoctl environment start
-tripgoctl connect
 make test-integration
+make lint
 ```
 
-`make test-integration` требует доступный `DATABASE_URL` из `.env`. Каждый тест
-создаёт отдельную схему с уникальным именем, применяет три исходные миграции и
-удаляет схему при завершении. Проверяются сохранение и чтение, занятый водитель,
-повторное завершение, отсутствующая поездка, полный откат записей в двух
-таблицах при настоящем нарушении CHECK, rollback после отмены и panic,
-параллельные создания, завершения и повторы ключа идемпотентности.
+Для тестов с `-race` нужен C-компилятор, для интеграционных тестов — доступный
+PostgreSQL, для линтера — `golangci-lint` v2.15.0. Тесты проверяют запись и
+сортировку координат, откат транзакции, переполнение очереди, отмену задачи и
+остановку воркеров. Команда `make generate` обновляет OpenAPI-код и gomock-моки.
 
-Unit-зависимости мокируются через `gomock`, а `mocks_test.go` генерируются
-через `go:generate` рядом с потребителем. Порог задания 50% относится к домену
-и usecase. `make test` печатает покрытие всех пакетов, включая сгенерированный
-код и точку сборки приложения.
+В Grafana смотрите размер очереди (`tripgo_position_requests_queue_size`),
+занятость воркеров (`tripgo_position_requests_workers_active`) и счётчик
+`tripgo_stale_checks_total` с результатами `queued`, `duplicate` и `dropped`.
+В Jaeger спан обработки `positions.request` связан со сканированием
+`positions.scan` через span link. Вызов Push Service виден отдельным HTTP-спаном.
 
-## Наблюдаемость
+Результаты проверок, план запроса PostgreSQL и графики нагрузки собраны в
+[отчёте по ЛР № 3](docs/lab3/README.md). Разбор слоёв и идемпотентного создания
+поездки есть в [документации ЛР № 2](LAB2_DOCUMENTATION.md).
 
-`environment.toml` использует `lab = 2` и компоненты `postgres`, `observability`.
-Адреса PostgreSQL и OTLP берутся из `.env`, ссылки на UI — из `tripgoctl connect`.
+## Запуск в Docker
 
-| Переменная | Значение из `.env.example` |
-|---|---|
-| `OTEL_SERVICE_NAME` | `trip-service` |
-| `OTEL_RESOURCE_ATTRIBUTES` | `service.namespace=tripgo,deployment.environment=local` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318`, заменяется окружением |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf`, также поддерживается `grpc` |
-| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` |
-| `OTEL_TRACES_SAMPLER_ARG` | необязательный аргумент sampler |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `3000`, миллисекунды |
-| `OTEL_BSP_EXPORT_TIMEOUT` | `3000`, миллисекунды |
-| `OTEL_METRIC_EXPORT_INTERVAL` | `5000`, миллисекунды |
-| `OTEL_METRIC_EXPORT_TIMEOUT` | `3000`, миллисекунды |
+Сначала поднимите окружение и выполните `make migrate` с хоста. Команда
+`make docker-build` соберёт образ `trip-service:lab3`.
 
-Провайдеры SDK передаются зависимостями. Единственный SDK-wide hook — обработчик
-внутренних ошибок OTel, направляющий их в JSON slog. Resource включает версию
-сборки. Используется W3C TraceContext. Асинхронный экспорт позволяет продолжать
-обслуживание при недоступном коллекторе. При остановке HTTP сначала завершается,
-затем сбрасываются сигналы телеметрии и закрывается PostgreSQL.
+На Linux с Docker Engine можно использовать сеть хоста.
 
-Цепочка HTTP — `Recover → Tracing → Logging → Metrics → router`.
-Ответ буферизуется, поэтому panic после частичной записи заменяет тело
-на `500 internal_error`. На запрос записывается один `request handled` с
-шаблоном маршрута, статусом, временем и `trace_id`/`span_id`. Для panic дополнительно
-пишется stack trace. Создание и завершение имеют отдельные бизнес-события.
+```bash
+docker run --rm --network host --env-file .env.example --env-file .env trip-service:lab3
+```
 
-На пуле стоит `otelpgx` с дополнением атрибутов таблицы и метрик в
-`infra/postgres`. SQL-параметры в спаны не попадают. Репозитории не зависят от OTel.
-Для текущих запросов распознаются три таблицы сервиса. В атрибутах HTTP только
-шаблоны маршрутов, что ограничивает число временных рядов.
+В Docker Desktop опубликуйте порт 8080 и укажите `host.docker.internal` как хост
+в `DATABASE_URL`, `PUSH_HTTP_URL` и `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
-Экспортируются `http.server.request.duration` (histogram, секунды),
-`http.server.active_requests` (up-down counter),
-`db.client.operation.duration` (histogram, секунды),
-`tripgo.trips.created` и `tripgo.trips.completed` (counter).
-Дополнительно из `docs/observability.md` курса реализован `tripgo.trips.active`
-(observable gauge, актуальное число активных поездок в PostgreSQL).
+```bash
+host_endpoint() {
+  sed -n "s/^$1=//p" .env |
+    sed -E 's#(//|@)(localhost|127\.0\.0\.1):#\1host.docker.internal:#'
+}
 
-Для проверки отправьте создание, чтение и завершение поездки из примера выше,
-найдите трейс `POST /api/v1/trips` в Jaeger, затем найдите тот же `trace_id`
-в JSON-логе. В Grafana Explore выберите Prometheus и запросите
-`http_server_request_duration_seconds_count`, `tripgo_trips_created_total`,
-`db_client_operation_duration_seconds_count`. Перцентили доступны через
-`histogram_quantile` и ряды с суффиксом `_bucket`.
-
-Материалы для описания PR и скриншоты находятся в [docs/lab2](docs/lab2/README.md).
+docker run --rm -p 8080:8080 --env-file .env.example --env-file .env \
+  -e "DATABASE_URL=$(host_endpoint DATABASE_URL)" \
+  -e "PUSH_HTTP_URL=$(host_endpoint PUSH_HTTP_URL)" \
+  -e "OTEL_EXPORTER_OTLP_ENDPOINT=$(host_endpoint OTEL_EXPORTER_OTLP_ENDPOINT)" \
+  trip-service:lab3
+```

@@ -18,13 +18,18 @@ import (
 
 func TestInvalidPathParameter(t *testing.T) {
 	t.Parallel()
-	handler := transport.NewHandler(nil, nil, nil, NewMockpinger(gomock.NewController(t)), time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := transport.NewHandler(nil, nil, nil, nil, nil, NewMockpinger(gomock.NewController(t)), time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	router := api.HandlerWithOptions(handler, api.ChiServerOptions{ErrorHandlerFunc: handler.ParameterError})
-	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/trips/not-a-uuid", nil)
-	router.ServeHTTP(res, req)
-	if res.Code != 400 || res.Header().Get("Content-Type") != "application/problem+json" || !strings.Contains(res.Body.String(), "invalid_request") || !strings.Contains(res.Body.String(), "tripId") {
-		t.Fatalf("status=%d body=%s", res.Code, res.Body)
+	for _, tt := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/trips/not-a-uuid"},
+		{http.MethodGet, "/api/v1/trips/not-a-uuid/positions"},
+		{http.MethodPost, "/api/v1/trips/not-a-uuid/positions"},
+	} {
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, httptest.NewRequest(tt.method, tt.path, nil))
+		if res.Code != 400 || res.Header().Get("Content-Type") != "application/problem+json" || !strings.Contains(res.Body.String(), "invalid_request") || !strings.Contains(res.Body.String(), "tripId") {
+			t.Errorf("%s %s: status=%d body=%s", tt.method, tt.path, res.Code, res.Body)
+		}
 	}
 }
 
@@ -40,7 +45,7 @@ func TestHealthAndReadiness(t *testing.T) {
 				failure = errors.New("connection refused")
 				expected = 503
 			}
-			handler := transport.NewHandler(nil, nil, nil, db, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			handler := transport.NewHandler(nil, nil, nil, nil, nil, db, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			res := httptest.NewRecorder()
 			handler.Health(res, httptest.NewRequest(http.MethodGet, "/health", nil))
 			if res.Code != 200 {

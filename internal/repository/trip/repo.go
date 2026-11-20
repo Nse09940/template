@@ -278,6 +278,7 @@ func tripColumns() []string {
 		statusColumn,
 		"started_at",
 		"finished_at",
+		"last_position_at",
 	}
 }
 
@@ -296,12 +297,17 @@ func scanTrip(row rowScanner) (model.Trip, error) {
 		&status,
 		&value.StartedAt,
 		&value.FinishedAt,
+		&value.LastPositionAt,
 	)
 	value.Status = trip.Status(status)
 	value.StartedAt = value.StartedAt.UTC()
 	if value.FinishedAt != nil {
 		finishedAt := value.FinishedAt.UTC()
 		value.FinishedAt = &finishedAt
+	}
+	if value.LastPositionAt != nil {
+		lastPositionAt := value.LastPositionAt.UTC()
+		value.LastPositionAt = &lastPositionAt
 	}
 	return value, err
 }

@@ -22,6 +22,13 @@ type Config struct {
 	DatabaseMaxConnLifetime time.Duration
 	DatabaseConnectTimeout  time.Duration
 	DatabaseQueryTimeout    time.Duration
+
+	PositionCheckInterval time.Duration
+	PositionStaleAfter    time.Duration
+	PositionWorkers       int
+	PositionQueueSize     int
+	PushHTTPURL           string
+	PushRequestTimeout    time.Duration
 }
 
 func Load() (Config, error) {
@@ -76,7 +83,53 @@ func Load() (Config, error) {
 		)
 	}
 
+	if err := cfg.loadPositions(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func (cfg *Config) loadPositions() error {
+	var err error
+	if cfg.PositionCheckInterval, err = durationWithDefault("POSITION_CHECK_INTERVAL", "30s"); err != nil {
+		return err
+	}
+	if cfg.PositionStaleAfter, err = durationWithDefault("POSITION_STALE_AFTER", "60s"); err != nil {
+		return err
+	}
+	if cfg.PositionWorkers, err = positiveInt("POSITION_WORKERS", "4"); err != nil {
+		return err
+	}
+	if cfg.PositionQueueSize, err = positiveInt("POSITION_QUEUE_SIZE", "100"); err != nil {
+		return err
+	}
+	if cfg.PushHTTPURL, err = required("PUSH_HTTP_URL"); err != nil {
+		return err
+	}
+	cfg.PushRequestTimeout, err = durationWithDefault("PUSH_REQUEST_TIMEOUT", "1s")
+	return err
+}
+
+func durationWithDefault(name, fallback string) (time.Duration, error) {
+	return parseDuration(name, envOrDefault(name, fallback))
+}
+
+func envOrDefault(name, fallback string) string {
+	if value, ok := os.LookupEnv(name); ok {
+		return value
+	}
+	return fallback
+}
+
+func positiveInt(name, fallback string) (int, error) {
+	value, err := strconv.ParseInt(envOrDefault(name, fallback), 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a 32-bit integer: %w", name, err)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return int(value), nil
 }
 
 func required(name string) (string, error) {
@@ -94,6 +147,10 @@ func duration(name string) (time.Duration, error) {
 		return 0, err
 	}
 
+	return parseDuration(name, value)
+}
+
+func parseDuration(name, value string) (time.Duration, error) {
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be a duration: %w", name, err)

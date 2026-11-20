@@ -10,8 +10,9 @@ import (
 )
 
 type stubTripRow struct {
-	startedAt  time.Time
-	finishedAt *time.Time
+	startedAt      time.Time
+	finishedAt     *time.Time
+	lastPositionAt *time.Time
 }
 
 func (r stubTripRow) Scan(dest ...any) error {
@@ -26,6 +27,7 @@ func (r stubTripRow) Scan(dest ...any) error {
 	*dest[8].(*string) = string(trip.StatusCompleted)
 	*dest[9].(*time.Time) = r.startedAt
 	*dest[10].(**time.Time) = r.finishedAt
+	*dest[11].(**time.Time) = r.lastPositionAt
 	return nil
 }
 
@@ -35,8 +37,9 @@ func TestScanTripNormalizesTimestampsToUTC(t *testing.T) {
 	moscow := time.FixedZone("Europe/Moscow", 3*60*60)
 	startedAt := time.Date(2026, 8, 24, 17, 18, 27, 905923000, moscow)
 	finishedAt := startedAt.Add(time.Hour)
+	lastPositionAt := startedAt.Add(time.Minute)
 
-	got, err := scanTrip(stubTripRow{startedAt: startedAt, finishedAt: &finishedAt})
+	got, err := scanTrip(stubTripRow{startedAt: startedAt, finishedAt: &finishedAt, lastPositionAt: &lastPositionAt})
 	if err != nil {
 		t.Fatalf("scanTrip: %v", err)
 	}
@@ -45,5 +48,8 @@ func TestScanTripNormalizesTimestampsToUTC(t *testing.T) {
 	}
 	if got.FinishedAt == nil || *got.FinishedAt != finishedAt.UTC() {
 		t.Fatalf("FinishedAt = %v, want %s", got.FinishedAt, finishedAt.UTC())
+	}
+	if got.LastPositionAt == nil || *got.LastPositionAt != lastPositionAt.UTC() {
+		t.Fatalf("LastPositionAt = %v, want %s", got.LastPositionAt, lastPositionAt.UTC())
 	}
 }

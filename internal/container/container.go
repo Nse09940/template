@@ -6,29 +6,38 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Nse09940/template/internal/config"
+	"github.com/Nse09940/template/internal/gateway/push"
 	"github.com/Nse09940/template/internal/generated"
 	transport "github.com/Nse09940/template/internal/http"
 	"github.com/Nse09940/template/internal/http/middleware"
 	createhandler "github.com/Nse09940/template/internal/http/trip/create"
+	createpositionhandler "github.com/Nse09940/template/internal/http/trip/createposition"
 	finishhandler "github.com/Nse09940/template/internal/http/trip/finish"
 	gethandler "github.com/Nse09940/template/internal/http/trip/get"
+	listpositionshandler "github.com/Nse09940/template/internal/http/trip/listpositions"
 	"github.com/Nse09940/template/internal/infra/postgres"
 	"github.com/Nse09940/template/internal/infra/postgres/transaction"
 	"github.com/Nse09940/template/internal/infra/telemetry"
 	repository "github.com/Nse09940/template/internal/repository/trip"
 	createusecase "github.com/Nse09940/template/internal/usecase/trip/create"
+	createpositionusecase "github.com/Nse09940/template/internal/usecase/trip/createposition"
 	finishusecase "github.com/Nse09940/template/internal/usecase/trip/finish"
 	getusecase "github.com/Nse09940/template/internal/usecase/trip/get"
+	listpositionsusecase "github.com/Nse09940/template/internal/usecase/trip/listpositions"
+	"github.com/Nse09940/template/internal/worker/positions"
 )
 
 type Container struct {
 	server    *http.Server
 	pool      *pgxpool.Pool
+	positions *positions.Pool
+	push      *push.Client
 	telemetry *telemetry.Telemetry
 	logger    *slog.Logger
 }
@@ -74,11 +83,23 @@ func (c *Container) configure(ctx context.Context, cfg config.Config) error {
 	if err := c.telemetry.ObserveActiveTrips(repo); err != nil {
 		return err
 	}
+	if err := c.configurePositionPolling(cfg, repo); err != nil {
+		return err
+	}
 	tx := transaction.NewTxManager(c.pool, cfg.DatabaseQueryTimeout, c.logger)
 	create := createusecase.New(repo, tx, c.logger, c.telemetry)
 	get := getusecase.New(repo)
 	finish := finishusecase.New(repo, tx, c.logger, c.telemetry)
-	handler := transport.NewHandler(createhandler.New(create, c.logger), gethandler.New(get, c.logger), finishhandler.New(finish, c.logger), c.pool, cfg.DatabaseQueryTimeout, c.logger)
+	createPosition := createpositionusecase.New(repo, tx, c.positions, c.telemetry, time.Now)
+	listPositions := listpositionsusecase.New(repo)
+	handler := transport.NewHandler(
+		createhandler.New(create, c.logger),
+		gethandler.New(get, c.logger),
+		finishhandler.New(finish, c.logger),
+		createpositionhandler.New(createPosition, c.logger),
+		listpositionshandler.New(listPositions, c.logger),
+		c.pool, cfg.DatabaseQueryTimeout, c.logger,
+	)
 	router := chi.NewRouter()
 	api.HandlerWithOptions(handler, api.ChiServerOptions{BaseRouter: router, ErrorHandlerFunc: handler.ParameterError})
 	instrumented, err := middleware.Wrap(router, c.logger, c.telemetry.TracerProvider, c.telemetry.MeterProvider)
@@ -89,7 +110,30 @@ func (c *Container) configure(ctx context.Context, cfg config.Config) error {
 	return nil
 }
 
+func (c *Container) configurePositionPolling(cfg config.Config, repo *repository.Repository) error {
+	var err error
+	c.push, err = push.New(cfg.PushHTTPURL, cfg.PushRequestTimeout, c.telemetry.TracerProvider)
+	if err != nil {
+		return fmt.Errorf("configure Push Service: %w", err)
+	}
+	c.positions, err = positions.New(positions.Config{
+		CheckInterval:  cfg.PositionCheckInterval,
+		StaleAfter:     cfg.PositionStaleAfter,
+		RequestTimeout: cfg.PushRequestTimeout,
+		Workers:        cfg.PositionWorkers,
+		QueueSize:      cfg.PositionQueueSize,
+	}, repo, c.push, c.logger,
+		c.telemetry.TracerProvider.Tracer("trip-service/positions"),
+		c.telemetry.MeterProvider.Meter("trip-service/positions"))
+	if err != nil {
+		return fmt.Errorf("configure position polling: %w", err)
+	}
+	return nil
+}
+
 func (c *Container) Run(ctx context.Context) error {
+	// Keep polling alive during HTTP shutdown so handlers can cancel queued requests.
+	c.positions.Start(context.WithoutCancel(ctx))
 	failures := make(chan error, 1)
 	go func() {
 		c.logger.InfoContext(ctx, "HTTP server started", "address", c.server.Addr)
@@ -112,6 +156,15 @@ func (c *Container) Close(ctx context.Context) error {
 		if err := c.server.Shutdown(ctx); err != nil {
 			closeErr = errors.Join(fmt.Errorf("shutdown HTTP server: %w", err), c.server.Close())
 		}
+		c.logger.InfoContext(ctx, "HTTP server stopped")
+	}
+	if c.positions != nil {
+		if err := c.positions.Shutdown(ctx); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("shutdown position polling: %w", err))
+		}
+	}
+	if c.push != nil {
+		c.push.CloseIdleConnections()
 	}
 	if c.telemetry != nil {
 		closeErr = errors.Join(closeErr, c.telemetry.Shutdown(ctx))
@@ -119,7 +172,6 @@ func (c *Container) Close(ctx context.Context) error {
 	if c.pool != nil {
 		closeErr = errors.Join(closeErr, closeWithinDeadline(ctx, c.pool.Close))
 	}
-	c.logger.InfoContext(ctx, "HTTP server stopped")
 	return closeErr
 }
 

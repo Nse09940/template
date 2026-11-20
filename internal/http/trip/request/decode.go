@@ -1,4 +1,4 @@
-package create
+package request
 
 import (
 	"bytes"
@@ -8,8 +8,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-
-	"github.com/Nse09940/template/internal/generated"
 )
 
 const maxRequestBodyBytes = 1 << 20
@@ -37,38 +35,35 @@ func ensureSingleJSONValue(decoder *json.Decoder) error {
 	return nil
 }
 
-func decodeTripData(w http.ResponseWriter, r *http.Request) (api.TripData, error) {
+func Decode(w http.ResponseWriter, r *http.Request, dst any, required []string, coordinates ...string) error {
+	if err := requireJSONContentType(r); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	var raw json.RawMessage
 	if err := decoder.Decode(&raw); err != nil {
-		return api.TripData{}, err
+		return err
 	}
 	if err := ensureSingleJSONValue(decoder); err != nil {
-		return api.TripData{}, err
+		return err
 	}
 
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return api.TripData{}, errors.New("request body must be a JSON object")
+		return errors.New("request body must be a JSON object")
 	}
-	if err := requireFields(fields, "user_id", "driver_id", "start_point", "end_point", "price"); err != nil {
-		return api.TripData{}, err
+	if err := requireFields(fields, required...); err != nil {
+		return err
 	}
-	if err := requireCoordinateFields(fields["start_point"], "start_point"); err != nil {
-		return api.TripData{}, err
-	}
-	if err := requireCoordinateFields(fields["end_point"], "end_point"); err != nil {
-		return api.TripData{}, err
+	for _, name := range coordinates {
+		if err := requireCoordinateFields(fields[name], name); err != nil {
+			return err
+		}
 	}
 
-	var body api.TripData
 	typedDecoder := json.NewDecoder(bytes.NewReader(raw))
 	typedDecoder.DisallowUnknownFields()
-	if err := typedDecoder.Decode(&body); err != nil {
-		return api.TripData{}, err
-	}
-
-	return body, nil
+	return typedDecoder.Decode(dst)
 }
 
 func requireCoordinateFields(raw json.RawMessage, name string) error {

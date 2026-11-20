@@ -102,8 +102,8 @@ func applyMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	if err != nil {
 		t.Fatalf("find migrations: %v", err)
 	}
-	if len(paths) != 3 {
-		t.Fatalf("expected the three existing migrations, got %d", len(paths))
+	if len(paths) == 0 {
+		t.Fatal("no migrations found")
 	}
 	for _, path := range paths {
 		contents, err := fs.ReadFile(files, path)

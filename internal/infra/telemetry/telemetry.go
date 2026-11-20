@@ -29,6 +29,7 @@ type Telemetry struct {
 	MeterProvider  *sdkmetric.MeterProvider
 	created        metric.Int64Counter
 	completed      metric.Int64Counter
+	positionsSaved metric.Int64Counter
 }
 
 func New(ctx context.Context, logLevel string) (*Telemetry, error) {
@@ -79,6 +80,7 @@ func New(ctx context.Context, logLevel string) (*Telemetry, error) {
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
 		sdkmetric.WithView(durationView("http.server.request.duration")),
 		sdkmetric.WithView(durationView("db.client.operation.duration")),
+		sdkmetric.WithView(durationView("tripgo.position_requests.duration")),
 	)
 	telemetry := &Telemetry{
 		Logger: logger, TracerProvider: tracerProvider, MeterProvider: meterProvider,
@@ -92,6 +94,10 @@ func New(ctx context.Context, logLevel string) (*Telemetry, error) {
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("create trips-completed counter: %w", err), telemetry.Shutdown(ctx))
 	}
+	telemetry.positionsSaved, err = meter.Int64Counter("tripgo.positions.saved", metric.WithUnit("{position}"))
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("create positions-saved counter: %w", err), telemetry.Shutdown(ctx))
+	}
 	return telemetry, nil
 }
 
@@ -101,6 +107,10 @@ func (t *Telemetry) Created(ctx context.Context) {
 
 func (t *Telemetry) Completed(ctx context.Context) {
 	t.completed.Add(ctx, 1)
+}
+
+func (t *Telemetry) PositionSaved(ctx context.Context) {
+	t.positionsSaved.Add(ctx, 1)
 }
 
 func (t *Telemetry) Shutdown(ctx context.Context) error {

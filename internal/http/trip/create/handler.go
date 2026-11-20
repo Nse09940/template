@@ -8,6 +8,7 @@ import (
 	"github.com/Nse09940/template/internal/generated"
 	"github.com/Nse09940/template/internal/http/respond"
 	"github.com/Nse09940/template/internal/http/trip/convert"
+	"github.com/Nse09940/template/internal/http/trip/request"
 	"github.com/Nse09940/template/internal/model"
 )
 
@@ -25,13 +26,9 @@ func (h *Handler) CreateTrip(
 	r *http.Request,
 	params api.CreateTripParams,
 ) {
-	if err := requireJSONContentType(r); err != nil {
-		h.response.Error(w, r, &trip.ValidationError{Message: err.Error()})
-		return
-	}
-
-	body, err := decodeTripData(w, r)
-	if err != nil {
+	var body api.TripData
+	if err := request.Decode(w, r, &body,
+		[]string{"user_id", "driver_id", "start_point", "end_point", "price"}, "start_point", "end_point"); err != nil {
 		h.response.Error(w, r, &trip.ValidationError{Message: err.Error()})
 		return
 	}
